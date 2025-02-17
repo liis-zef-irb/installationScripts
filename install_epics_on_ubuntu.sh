@@ -12,7 +12,7 @@ echo "export SUPPORT=${EPICS_ROOT}/support" >> ~/.bashrc
 source ~/.bashrc
 
 cd ${EPICS_BASE}
-sudo make
+make
 
 echo "SUPPORT=$SUPPORT" >> configure/RELEASE
 echo '-include $(TOP)/configure/SUPPORT.$(EPICS_HOST_ARCH)' >> configure/RELEASE
