@@ -20,6 +20,8 @@ echo "EPICS_BASE=$EPICS_BASE" >> configure/RELEASE
 echo '-include $(TOP)/configure/EPICS_BASE' >> configure/RELEASE
 echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> configure/RELEASE
 
+sudo apt-get libtirpc-dev re2c
+
 cd ${EPICS_ROOT}
 wget https://raw.githubusercontent.com/liis-zef-irb/installationScripts/refs/heads/main/assemble_synApps
 perl assemble_synApps
