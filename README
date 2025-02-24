@@ -1,0 +1,5 @@
+No need to pull, just run from anywhere in your local storage:
+
+wget https://raw.githubusercontent.com/liis-zef-irb/installationScripts/refs/heads/main/install_epics_on_ubuntu.sh
+chmod +x install_epics_on_ubuntu.sh
+./install_epics_on_ubuntu.sh
