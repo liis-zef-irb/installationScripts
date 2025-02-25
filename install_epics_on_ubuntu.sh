@@ -1,4 +1,4 @@
-sudo apt-get install git-all build-essential cmake
+SCRIPTS_DIR = $(pwd)
 
 mkdir $HOME/EPICS
 cd $HOME/EPICS/
@@ -11,6 +11,7 @@ echo "export PATH=${EPICS_BASE}/bin/${EPICS_HOST_ARCH}:${PATH}" >> ~/.bashrc
 echo "export SUPPORT=${EPICS_ROOT}/support" >> ~/.bashrc
 source ~/.bashrc
 
+sudo apt-get build-essential cmake
 cd ${EPICS_BASE}
 make
 
@@ -22,8 +23,8 @@ echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> configure/RELE
 
 sudo apt-get libtirpc-dev re2c
 
-cd ${EPICS_ROOT}
-wget https://raw.githubusercontent.com/liis-zef-irb/installationScripts/refs/heads/main/assemble_synApps
+cd ${SCRIPTS_DIR}
+chmod +x assemble_synApps
 perl assemble_synApps
 cd support
 make
