@@ -2,6 +2,8 @@ prepare your machine for ssh communication so you can use xTerm:
 	sudo apt-get install ssh
 
 prepare your machine for git and github:
+	sudo apt-get update
+	sudo apt-get upgrade
 	sudo apt-get install git-all
 	ssh-keygen -t ed25519 -C "e-mail"  (server mail is liis.zef.irb@gmail.com, but use yours for your Linux machine)
 	> Enter file in which to save the key (/c/Users/YOU/.ssh/id_ALGORITHM):[Press enter for default]
