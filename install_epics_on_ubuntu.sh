@@ -1,7 +1,12 @@
-SCRIPTS_DIR = $(pwd)
+export SCRIPTS_DIR=$(pwd)
+export EPICS_ROOT=${HOME}/EPICS
+export EPICS_BASE=${EPICS_ROOT}/base
+export EPICS_HOST_ARCH=$(${EPICS_BASE}/startup/EpicsHostArch)
+export PATH=${EPICS_BASE}/bin/${EPICS_HOST_ARCH}:${PATH}
+export SUPPORT=${EPICS_ROOT}/support
 
-mkdir $HOME/EPICS
-cd $HOME/EPICS/
+mkdir $EPICS_ROOT
+cd $EPICS_ROOT
 git clone --recursive https://github.com/epics-base/epics-base.git base
 
 echo "export EPICS_ROOT=${HOME}/EPICS" >> ~/.bashrc
@@ -22,7 +27,6 @@ echo '-include $(TOP)/configure/EPICS_BASE' >> configure/RELEASE
 echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> configure/RELEASE
 
 sudo apt-get libtirpc-dev re2c
-
 cd ${SCRIPTS_DIR}
 chmod +x assemble_synApps
 perl assemble_synApps
