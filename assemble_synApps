@@ -20,7 +20,7 @@ my $SUPPORT='R6-3';
 my $HAVE_HIDAPI='NO';
 my $WITH_PVA='YES';
 
-my $SYNAPPS_DIR='';
+my $SYNAPPS_DIR='/home/epics/EPICS';
 
 my $HELP;
 my $CHECK;

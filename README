@@ -18,3 +18,5 @@ git clone git@github.com:liis-zef-irb/installationScripts.git
 cd installationScripts
 chmod +x install_epics_on_ubuntu.sh
 ./install_epics_on_ubuntu.sh
+
+wait for the first prompt that expect "yes", type it and relax... it will take more than half an hour..
