@@ -2,8 +2,6 @@ prepare your machine for ssh communication so you can use xTerm:
 	sudo apt-get install ssh
 
 prepare your machine for git and github:
-	sudo apt-get update
-	sudo apt-get upgrade
 	sudo apt-get install git-all
 	ssh-keygen -t ed25519 -C "e-mail"  (server mail is liis.zef.irb@gmail.com, but use yours for your Linux machine)
 	> Enter file in which to save the key (/c/Users/YOU/.ssh/id_ALGORITHM):[Press enter for default]
@@ -21,4 +19,11 @@ cd installationScripts
 chmod +x install_epics_on_ubuntu.sh
 ./install_epics_on_ubuntu.sh
 
-wait for the first prompt that expect "yes", type it and relax... it will take more than half an hour..
+relax... it will take more than half an hour..
+
+TODO:
+- IOCs
+- tests
+- alarm server
+- archiver
+- alarm logger
