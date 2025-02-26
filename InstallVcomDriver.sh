@@ -1,13 +1,13 @@
 # Prepare driver files with compability modification
-unzip Advantech-VCOM-Linux-Driver-2.3.5.zip
-scp adv_uart.c Advantech-VCOM-Linux-Driver-2.3.5/driver/adv_uart.c
+unzip Advantech-VCOM-Linux-Driver-2.3.5.zip -d ../drivers
+scp adv_uart.c ../drivers/Advantech-VCOM-Linux-Driver-2.3.5/driver/adv_uart.c
 
 # Prepare LIIS device mapping
-scp advttyd.conf Advantech-VCOM-Linux-Driver-2.3.5/config/advttyd.conf
+scp advttyd.conf ../drivers/Advantech-VCOM-Linux-Driver-2.3.5/config/advttyd.conf
 
 # Make driver
 sudo apt-get install linux-headers-generic dkms openssl libssl-dev
-cd Advantech-VCOM-Linux-Driver-2.3.5/
+cd ../drivers/Advantech-VCOM-Linux-Driver-2.3.5/
 make
 
 # Install driver

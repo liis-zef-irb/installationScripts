@@ -14,13 +14,13 @@ my $releasefile="default";
 my %modules = ();
 my %setmodule = ();
 
-my $EPICS_BASE='/home/epics/EPICS/base';
+my $EPICS_BASE=$ENV{EPICS_BASE};
 my $SUPPORT='R6-3';
 
 my $HAVE_HIDAPI='NO';
 my $WITH_PVA='YES';
 
-my $SYNAPPS_DIR='/home/epics/EPICS';
+my $SYNAPPS_DIR=$ENV{EPICS_ROOT};
 
 my $HELP;
 my $CHECK;
