@@ -1,9 +1,9 @@
 # Configure folders in epics base
-echo "SUPPORT=$SUPPORT" >> configure/RELEASE
-echo '-include $(TOP)/configure/SUPPORT.$(EPICS_HOST_ARCH)' >> configure/RELEASE
-echo "EPICS_BASE=$EPICS_BASE" >> configure/RELEASE
-echo '-include $(TOP)/configure/EPICS_BASE' >> configure/RELEASE
-echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> configure/RELEASE
+echo "SUPPORT=$SUPPORT" >> $EPICS_BASE/configure/RELEASE
+echo '-include $(TOP)/configure/SUPPORT.$(EPICS_HOST_ARCH)' >> $EPICS_BASE/configure/RELEASE
+echo "EPICS_BASE=$EPICS_BASE" >> $EPICS_BASE/configure/RELEASE
+echo '-include $(TOP)/configure/EPICS_BASE' >> $EPICS_BASE/configure/RELEASE
+echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> $EPICS_BASE/configure/RELEASE
 
 # Clone and prepare synapps modules chosen in assemble_synapps
 scp ./assemble_synApps ${EPICS_ROOT}/assemble_synApps
