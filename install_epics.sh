@@ -1,9 +1,6 @@
 # Location of EPICS, feel free to change
 EPICS_ROOT=${HOME}/EPICS
 
-# Location of all installation scripts
-SCRIPTS_DIR=$(pwd)
-
 # Clone base repository from github
 mkdir $EPICS_ROOT
 cd $EPICS_ROOT
@@ -29,33 +26,6 @@ sudo apt-get upgrade -y
 sudo apt-get install build-essential cmake -y
 cd ${EPICS_BASE}
 make
-
-# Configure folders in epics base
-echo "SUPPORT=$SUPPORT" >> configure/RELEASE
-echo '-include $(TOP)/configure/SUPPORT.$(EPICS_HOST_ARCH)' >> configure/RELEASE
-echo "EPICS_BASE=$EPICS_BASE" >> configure/RELEASE
-echo '-include $(TOP)/configure/EPICS_BASE' >> configure/RELEASE
-echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> configure/RELEASE
-
-# Clone and prepare synapps modules chosen in assemble_synapps
-scp ${SCRIPTS_DIR}/assemble_synApps ${EPICS_ROOT}/assemble_synApps
-cd ${EPICS_ROOT}
-chmod +x assemble_synApps
-source ~/.bashrc
-perl assemble_synApps
-
-# Build synApps
-sudo apt-get install libtirpc-dev re2c -y
-cd ${SUPPORT}
-make
-
-# Clone LIBI IOCs
-cd ${EPICS_ROOT}
-# git clone git@github.com:liis-zef-irb/IOCs.git
-
-# Install VCOM driver
-cd ${SCRIPTS_DIR}
-/bin/bash ./InstallVcomDriver.sh
 
 
 echo "================================DONE=========================="

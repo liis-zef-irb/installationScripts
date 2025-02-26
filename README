@@ -2,7 +2,7 @@ prepare your machine for ssh communication so you can use xTerm:
 	sudo apt-get install ssh
 
 prepare your machine for git and github:
-	sudo apt-get install git-all
+	sudo apt-get install git-all -y
 	ssh-keygen -t ed25519 -C "e-mail"  (server mail is liis.zef.irb@gmail.com, but use yours for your Linux machine)
 	> Enter file in which to save the key (/c/Users/YOU/.ssh/id_ALGORITHM):[Press enter for default]
 	> Enter passphrase (empty for no passphrase): [Press enter]
@@ -16,13 +16,29 @@ Add SSH key
 
 git clone git@github.com:liis-zef-irb/installationScripts.git
 cd installationScripts
-chmod +x install_epics_on_ubuntu.sh
-./install_epics_on_ubuntu.sh
+chmod +x install_epics.sh
+./install_epics.sh
 
-relax... it will take more than half an hour..
+relax... it might take half an hour..
+
+source ~/.bashrc
+chmod +x install_synApps.sh
+./install_synApps.sh
+
+
+
+Optional:
+
+- Clone LIBI IOCs:
+cd ${EPICS_ROOT}
+git clone git@github.com:liis-zef-irb/IOCs.git
+
+- Install VCOM driver:
+cd ${SCRIPTS_DIR}
+/bin/bash ./InstallVcomDriver.sh
 
 TODO:
-- IOCs
+- make IOCs
 - tests
 - alarm server
 - archiver

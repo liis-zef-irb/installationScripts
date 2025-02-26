@@ -22,3 +22,6 @@ sudo advman -o start
 sudo make install -C ./misc/systemd/
 systemctl enable advvcom.service
 systemctl start advvcom.service
+
+
+echo "================================DONE=========================="
