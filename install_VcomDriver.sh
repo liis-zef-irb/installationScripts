@@ -6,7 +6,7 @@ scp adv_uart.c ../drivers/Advantech-VCOM-Linux-Driver-2.3.5/driver/adv_uart.c
 scp advttyd.conf ../drivers/Advantech-VCOM-Linux-Driver-2.3.5/config/advttyd.conf
 
 # Make driver
-sudo apt-get install linux-headers-generic dkms openssl libssl-dev
+sudo apt-get install linux-headers-generic dkms openssl libssl-dev -y
 cd ../drivers/Advantech-VCOM-Linux-Driver-2.3.5/
 make
 
