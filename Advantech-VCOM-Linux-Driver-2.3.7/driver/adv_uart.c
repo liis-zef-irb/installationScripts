@@ -117,7 +117,6 @@ static void adv_uart_start_tx(struct uart_port *port)
 	struct ring_buf * tx;
 
 	adv_port = (struct adv_uart_port *)port;
-
 	tx = adv_port->tx;
 
 	spin_lock(&(tx->lock));
@@ -209,56 +208,44 @@ void adv_uart_recv_chars(struct uart_port *port)
 		}
 	}
 }
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,10,0)
 void adv_uart_xmit(struct uart_port *port)
 {
 	struct adv_uart_port * up = (struct adv_uart_port *)port;
-	struct tty_port *tport = &port->state->port;
+	struct tty_port * tport = &up->port.state->port;
 	struct ring_buf *tx = up->tx;
 	char * tx_base = up->tx->data;
-	int tx_size, tx_lsize, count;
+	unsigned char * fifo_tail;
+	int tx_lsize;
 	int mcplen;
 	int tx_tail;
-	int max_retry;
-	unsigned char ch;
 	
-	if(kfifo_is_empty(&tport->xmit_fifo)){
-		return;	
-	}
 	if(get_rb_room(*tx) == 0){
 		return;
 	}
 
-	count = kfifo_len(&tport->xmit_fifo);
-	tx_size = get_rb_room(*tx);
-	tx_lsize = get_rb_lroom(*tx);
-	
-	count = (count < tx_size)?count:tx_size;
-
-	max_retry = 3;
-
-	do{
+	while(!(kfifo_is_empty(&tport->xmit_fifo))){
 		tx_tail = get_rb_tail(*tx);
-
-		if(count > tx_lsize){
-			mcplen = tx_lsize;
-		}else{
-			mcplen = count;
-		}
-
-		while (mcplen-- > 0 && kfifo_get(&tport->xmit_fifo, &ch)) {
-			tx_base[tx_tail] = ch;
-			tx_tail = (tx_tail + 1) % tx->size;
-			count--;
-		}
 		tx_lsize = get_rb_lroom(*tx);
 
-		max_retry--;
+		if(tx_lsize == 0){
+			break;
+		}
 
-	}while(count > 0 && max_retry > 0);
+		mcplen = kfifo_out_linear_ptr(&tport->xmit_fifo, 
+									&fifo_tail, tx_lsize);
+		if(mcplen == 0){
+			break;
+		}
+		memcpy(&tx_base[tx_tail], fifo_tail, mcplen);
+		uart_xmit_advance(port, mcplen);
+		move_rb_tail(tx, mcplen);
+	}
 
 }
-
+#else
+#include "./legacy/uart/adv_uart_xmit.h"
+#endif
 
 static unsigned int adv_uart_tx_empty(struct uart_port *port)
 {
@@ -329,7 +316,7 @@ static void adv_uart_break_ctl(struct uart_port *port, int break_state)
 	printk("%s(%d)\n", __func__, __LINE__);
 
 }
-int adv_uart_startup(struct uart_port *port)
+static int adv_uart_startup(struct uart_port *port)
 {
 	struct adv_uart_port * up = (struct adv_uart_port *)port;
 	struct adv_port_att * attr = up->attr;
@@ -458,7 +445,7 @@ adv_uart_set_termios(struct uart_port *port, struct ktermios *termios,
 	
 	spin_unlock(&adv_attr->lock);
 
-	uart_update_timeout(port, termios->c_cflag, termios->c_ispeed);
+	uart_update_timeout(port, termios->c_cflag, attr->baud);
 
 	if(waitqueue_active(&adv_attr->wait)){
 		wake_up_interruptible(&adv_attr->wait);
@@ -499,7 +486,7 @@ adv_uart_type(struct uart_port *port)
 	return "Advantech VCOM";
 }
 
-void adv_uart_throttle(struct uart_port *port)
+static void adv_uart_throttle(struct uart_port *port)
 {
 	struct adv_uart_port * adv_port;
 	struct adv_port_att * attr;
@@ -516,7 +503,7 @@ void adv_uart_throttle(struct uart_port *port)
 	}
 }
 
-void adv_uart_unthrottle(struct uart_port *port)
+static void adv_uart_unthrottle(struct uart_port *port)
 {
 	struct adv_uart_port * adv_port;
 	struct adv_port_att * attr;

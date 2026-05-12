@@ -1,3 +1,14 @@
+Scripts to install epics and support modules for LIBI, except areaDetector.
+
+It is recommended to use docker instead.
+
+This repo is still necessary because assemble synapps and vcom driver for docker images are downloaded from here
+
+----------------------------------------------------------------------------------------------------------------
+
+
+
+
 prepare your machine for ssh communication so you can use xTerm:
 	sudo apt-get install ssh
 
