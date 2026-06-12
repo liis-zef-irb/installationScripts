@@ -33,13 +33,17 @@ chmod +x install_epics.sh
 ./install_epics.sh
 
 relax... it might take half an hour..
-check file assemble_synapps lines 52-98 if everything you need is included. If you include something more you might need some new packages from apt-get
+check file synApps_libi.txt if everything you need is included. If you include something more you might need some new packages from apt-get
 
 source ~/.bashrc
 chmod +x install_synApps.sh
 ./install_synApps.sh
 
+Adding modules and updating synApps:
 
+- Edit synApps_libi.txt to add what you need
+- chmod +x update_synApps.sh
+- ./update_synApps.sh
 
 Optional:
 

@@ -9,7 +9,7 @@ echo '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)' >> $EPICS_BASE/co
 scp ./assemble_synApps ${EPICS_ROOT}/assemble_synApps
 cd ${EPICS_ROOT}
 chmod +x assemble_synApps
-perl assemble_synApps
+perl assemble_synApps --config=synApps_libi.txt
 
 # Build synApps
 sudo apt-get install libtirpc-dev re2c -y

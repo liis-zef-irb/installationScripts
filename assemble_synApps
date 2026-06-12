@@ -7,12 +7,15 @@ use Fcntl;
 use File::Copy;
 use File::Copy "move";
 use File::Path "rmtree";
+use File::Spec;
 use Getopt::Long;
 
 my $releasefile="default";
 
 my %modules = ();
 my %setmodule = ();
+my %module_info = ();
+my %module_patches = ();
 
 my $EPICS_BASE=$ENV{EPICS_BASE};
 my $SUPPORT='R6-3';
@@ -24,13 +27,30 @@ my $SYNAPPS_DIR=$ENV{EPICS_ROOT};
 
 my $HELP;
 my $CHECK;
+my $QUIET;
+my $VERBOSE;
+my $UPDATE;
 
 GetOptions ("config=s" => \$releasefile,
             "dir=s" => \$SYNAPPS_DIR,
             "base=s" => \$EPICS_BASE,
 			"set=s" => \%setmodule,
             "help" => \$HELP,
-			"check" => \$CHECK) or die("error");
+			"check" => \$CHECK,
+			"quiet" => \$QUIET,
+			"verbose" => \$VERBOSE,
+			"update" => \$UPDATE) or die("error");
+
+if ($QUIET && $VERBOSE)
+{
+	die "ERROR: --quiet and --verbose are mutually exclusive\n";
+}
+
+my @git_quiet = $VERBOSE ? () : ("-q");
+
+# Tracks which modules were cloned or restored (i.e., changed)
+# Modules skipped by --update will not appear in this hash
+my %updated = ();
 
 if ($HELP)
 {
@@ -40,6 +60,9 @@ if ($HELP)
 	print "\t--dir=<synapps dir name>\n";
 	print "\t--set <module>=<tag>\n";
 	print "\t--base=<EPICS BASE location>\n";
+	print "\t--update\n";
+	print "\t--quiet\n";
+	print "\t--verbose\n";
 	print "\t--help\n";
 	print "\t--check\n";
 	
@@ -49,7 +72,7 @@ if ($HELP)
 
 if ($releasefile eq "default")
 {
-	# $modules{'ALIVE'} = 'R1-4-1';
+	$modules{'ALIVE'} = 'R1-4-1';
 	#$modules{'ALLENBRADLEY'} = '2.3';
 	# $modules{'AREA_DETECTOR'} = 'R3-12-1';
 	# $modules{'AREA_DETECTOR_SUBMODULES'} = ''; # Space-separated list of extra submodules to check out
@@ -68,17 +91,17 @@ if ($releasefile eq "default")
 	# $modules{'ETHERIP'} = 'ether_ip-3-3';
 	# $modules{'GALIL'} = 'V3-5';
 	# $modules{'IP'} = 'R2-22';
-	# $modules{'IPAC'} = '2.16';
+    $modules{'IPAC'} = '2.16';
 	# $modules{'IP330'} = 'R2-10';
 	# $modules{'IPUNIDIG'} = 'R2-12';
 	# $modules{'LABJACK'} = 'R3-0';
 	# $modules{'LOVE'} = 'R3-2-9';
-	# $modules{'LUA'} = 'R3-1';
+	$modules{'LUA'} = 'R3-1';
 	# $modules{'MCA'} = 'R7-10';
 	# $modules{'MEASCOMP'} = 'R4-2';
 	# $modules{'ULDAQ'} = '1.2.1';
 	$modules{'MODBUS'} = 'R3-3';
-	# $modules{'MOTOR'} = 'R7-3-1';
+    $modules{'MOTOR'} = 'R7-3-1';
 	#$modules{'MCOREUTILS'} = '1.2.2';
 	#$modules{'OPCUA'} = 'v0.9.3';
 	#$modules{'UASDK'} = '/path/to/sdk';
@@ -106,9 +129,32 @@ elsif (-e $releasefile)
 		#Strip newline
 		$line =~ s/\R\z//g;
 		
-		my @parts = split(/=/, $line);
+		# Skip blank lines and comments
+		next if $line =~ /^\s*$/;
+		next if $line =~ /^\s*#/;
 		
-		$modules{"$parts[0]"} = "$parts[1]"
+		# Split on first '=' only, trim whitespace
+		my ($key, $val) = split(/=/, $line, 2);
+		
+		$key =~ s/^\s+|\s+$//g;
+		$val =~ s/^\s+|\s+$//g if defined $val;
+		
+		validate_tag($key, $key);
+		
+		# AREA_DETECTOR_SUBMODULES is a space-separated list
+		if ($key eq "AREA_DETECTOR_SUBMODULES")
+		{
+			foreach my $submod (split(/\s+/, $val // ''))
+			{
+				validate_tag("$key entry", $submod) if $submod ne '';
+			}
+		}
+		elsif (defined $val && $val ne '')
+		{
+			validate_tag($key, $val);
+		}
+		
+		$modules{$key} = $val // '';
 	}
 	
 	close($releasehandle);
@@ -116,6 +162,20 @@ elsif (-e $releasefile)
 
 foreach my $change (keys %setmodule)
 {
+	validate_tag($change, $change);
+	
+	if ($change eq "AREA_DETECTOR_SUBMODULES")
+	{
+		foreach my $submod (split(/\s+/, $setmodule{$change}))
+		{
+			validate_tag("$change entry", $submod) if $submod ne '';
+		}
+	}
+	elsif ($setmodule{$change} ne '')
+	{
+		validate_tag($change, $setmodule{$change});
+	}
+	
 	$modules{$change} = $setmodule{$change};
 }
 
@@ -131,6 +191,50 @@ if ($CHECK)
 	exit;
 }
 
+if (! -d $EPICS_BASE)
+{
+	die "ERROR: EPICS_BASE directory does not exist: $EPICS_BASE\n";
+}
+
+if (! -f "$EPICS_BASE/include/epicsVersion.h")
+{
+	die "ERROR: $EPICS_BASE does not appear to be a valid EPICS base installation (missing include/epicsVersion.h)\n";
+}
+
+
+
+# Print a progress message unless --quiet is set
+sub info {
+	print @_ unless $QUIET;
+}
+
+# Run a system command, suppressing stdout in quiet mode
+sub run_cmd {
+	my @cmd = @_;
+	
+	if ($QUIET)
+	{
+		open(my $save_stdout, ">&", \*STDOUT);
+		open(STDOUT, ">", File::Spec->devnull());
+		my $ret = system(@cmd);
+		open(STDOUT, ">&", $save_stdout);
+		return $ret;
+	}
+	
+	return system(@cmd);
+}
+
+
+# Validates that a module name or tag contains only safe characters.
+# Prevents shell injection when values are interpolated into commands.
+sub validate_tag {
+	my ($name, $value) = @_;
+	
+	if ($value !~ /^[A-Za-z0-9._-]+$/)
+	{
+		die "ERROR: Invalid value for $name: '$value' (only alphanumeric, '.', '-', '_' allowed)\n";
+	}
+}
 
 
 #
@@ -153,26 +257,23 @@ sub copy_recur {
 
 
 #
-# Used because perl backtick usage seems to be significantly different 
-# between Linux and Windows
+# Replaces all occurrences of a pattern in a file.
+# Note: $search is used as a regex pattern. Use \Q...\E to match literal strings.
 sub do_substitution {
-	my @parms = @_;
+	my ($search, $replace, $file) = @_;
 	
-	my $search = $parms[0];
-	my $replace = $parms[1];
-	my $file = $parms[2];
+	my $tmpfile = $file . '.tmp';
 	
-	rename ($file, $file . '.bak');
-	open (IN, '<' . $file . '.bak') or die $!;
-	open (OUT, '>' . $file) or die $!;
-	while (<IN>)  {
+	open (my $in, '<', $file) or die "do_substitution: cannot read $file: $!\n";
+	open (my $out, '>', $tmpfile) or die "do_substitution: cannot write $tmpfile: $!\n";
+	while (<$in>)  {
 		$_ =~ s/$search/$replace/g;
-		print OUT $_;
+		print $out $_;
 	}
-	close (IN);
-	close (OUT);
+	close ($in);
+	close ($out);
 	
-	unlink($file . '.bak');
+	rename($tmpfile, $file) or die "do_substitution: cannot rename $tmpfile to $file: $!\n";
 }
 
 
@@ -188,41 +289,87 @@ sub get_repo {
 	my $FILTER_TAG=$parms[3];
 	my $REL = $parms[4];
 	
+	# Defense-in-depth: validate before shell interpolation
+	validate_tag("$RELEASE_NAME project", $PROJECT);
+	validate_tag("$RELEASE_NAME repo", $MODULE_NAME);
+	validate_tag($RELEASE_NAME, $TAG);
+	
 	$FILTER_TAG =~ s/\./-/g;
 	
 	my $FOLDER_NAME="$MODULE_NAME-${FILTER_TAG}";
 	
 	if (! -d "${FOLDER_NAME}")
 	{
-		print "\n";
-		print "Grabbing $MODULE_NAME at tag: $TAG\n";
-		print "\n";
+		info "\n";
+		info "Grabbing $MODULE_NAME at tag: $TAG\n";
+		info "\n";
 		
-		`git clone -q https://github.com/$PROJECT/${MODULE_NAME}.git ${FOLDER_NAME}`;
+		run_cmd("git", "clone", @git_quiet, "https://github.com/$PROJECT/${MODULE_NAME}.git", "${FOLDER_NAME}");
+		die "ERROR: Failed to clone $MODULE_NAME from $PROJECT\n" if $? != 0;
 		
-		chdir "$FOLDER_NAME";
-		`git checkout -q $TAG`;
-		chdir "..";
+		chdir "$FOLDER_NAME" or die "ERROR: Cannot enter directory $FOLDER_NAME: $!\n";
+		run_cmd("git", "checkout", @git_quiet, "$TAG");
+		die "ERROR: Failed to checkout tag $TAG for $MODULE_NAME\n" if $? != 0;
+		chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
 		
 		say $REL "$RELEASE_NAME=\$(SUPPORT)/$FOLDER_NAME";
+		$updated{$RELEASE_NAME} = 1;
 		
-		print "\n";
+		info "\n";
+	}
+	elsif ($UPDATE)
+	{
+		# Check if already at the correct tag or branch
+		chdir "$FOLDER_NAME" or die "ERROR: Cannot enter directory $FOLDER_NAME: $!\n";
+		my $current_ref = `git describe --tags --exact-match HEAD 2>/dev/null`;
+		if ($? != 0)
+		{
+			$current_ref = `git symbolic-ref --short HEAD 2>/dev/null`;
+		}
+		chomp $current_ref if defined $current_ref;
+		chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
+		
+		if (defined $current_ref && $current_ref eq $TAG)
+		{
+			info "Skipping $MODULE_NAME (already at $TAG)\n";
+			say $REL "$RELEASE_NAME=\$(SUPPORT)/$FOLDER_NAME";
+		}
+		else
+		{
+			info "\n";
+			info "Updating $MODULE_NAME to tag: $TAG\n";
+			info "\n";
+			
+			chdir "$FOLDER_NAME" or die "ERROR: Cannot enter directory $FOLDER_NAME: $!\n";
+			run_cmd("git", "stash", @git_quiet);
+			run_cmd("git", "clean", "-fdx");
+			run_cmd("git", "checkout", @git_quiet, "$TAG");
+			die "ERROR: Failed to checkout tag $TAG for $MODULE_NAME\n" if $? != 0;
+			chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
+			
+			say $REL "$RELEASE_NAME=\$(SUPPORT)/$FOLDER_NAME";
+			$updated{$RELEASE_NAME} = 1;
+			
+			info "\n";
+		}
 	}
 	else
 	{
-		print "\n";
-		print "Restoring $MODULE_NAME to tag: $TAG\n";
-		print "\n";
+		info "\n";
+		info "Restoring $MODULE_NAME to tag: $TAG\n";
+		info "\n";
 		
-		chdir "$FOLDER_NAME";
-		`git stash -q`;
-		`git clean -fdx`;
-		`git checkout -q $TAG`;
-		chdir "..";
+		chdir "$FOLDER_NAME" or die "ERROR: Cannot enter directory $FOLDER_NAME: $!\n";
+		run_cmd("git", "stash", @git_quiet);
+		run_cmd("git", "clean", "-fdx");
+		run_cmd("git", "checkout", @git_quiet, "$TAG");
+		die "ERROR: Failed to checkout tag $TAG for $MODULE_NAME\n" if $? != 0;
+		chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
 		
 		say $REL "$RELEASE_NAME=\$(SUPPORT)/$FOLDER_NAME";
+		$updated{$RELEASE_NAME} = 1;
 		
-		print "\n";
+		info "\n";
 	}
 }
 
@@ -242,14 +389,75 @@ sub add_line {
 
 
 
+# Compute the directory name for a module from %module_info and %modules
+# Follows the same convention as get_repo: repo-FILTER_TAG (dots replaced with dashes)
+sub module_dir {
+	my ($key) = @_;
+	my $tag = $modules{$key};
+	$tag =~ s/\./-/g;
+	return "$module_info{$key}{repo}-$tag";
+}
+
+
+# Apply a list of patch operations to a module directory.
+# Handles the exists/update guard, chdir in/out, and dispatches operations.
+# Each patch is a hashref with an 'op' key and operation-specific fields.
+# Optional 'cond' key is a code ref; patch is skipped if it returns false.
+#
+# Supported operations:
+#   substitute      - {search, replace, file}
+#   substitute_glob - {search, replace, pattern}
+#   add_line        - {line, file}
+#   write_file      - {file, lines => [...]}
+#   copy            - {src, dst}
+#   unlink          - {file}
+#   unlink_glob     - {pattern}
+#   init_submodules - {paths => [...]}
+
+sub apply_patches {
+	my ($key, $patches_ref) = @_;
+	
+	return unless exists($modules{$key});
+	return if $UPDATE && !$updated{$key};
+	
+	my $dir = module_dir($key);
+	
+	chdir $dir or die "ERROR: Cannot enter directory $dir: $!\n";
+	
+	foreach my $patch (@{$patches_ref})
+	{
+		if (exists($patch->{cond}))
+		{
+			next unless $patch->{cond}->();
+		}
+		
+		my $op = $patch->{op};
+		
+		if    ($op eq "substitute")      { do_substitution($patch->{search}, $patch->{replace}, $patch->{file}); }
+		elsif ($op eq "substitute_glob") { foreach my $f (glob($patch->{pattern})) { do_substitution($patch->{search}, $patch->{replace}, $f); } }
+		elsif ($op eq "add_line")        { add_line($patch->{line}, $patch->{file}); }
+		elsif ($op eq "write_file")      { unlink($patch->{file}); foreach my $l (@{$patch->{lines}}) { add_line($l, $patch->{file}); } }
+		elsif ($op eq "copy")            { copy($patch->{src}, $patch->{dst}); }
+		elsif ($op eq "unlink")          { unlink($patch->{file}); }
+		elsif ($op eq "unlink_glob")     { foreach my $f (glob($patch->{pattern})) { unlink($f); } }
+		elsif ($op eq "init_submodules") { my @paths = exists($patch->{paths}) ? @{$patch->{paths}} : ();
+		                                   run_cmd("git", "submodule", "update", "--init", @paths);
+		                                   warn "WARNING: git submodule update --init failed for $key\n" if $? != 0; }
+		else                             { warn "WARNING: Unknown patch operation '$op' for $key\n"; }
+	}
+	
+	chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
+}
+
+
 #################################
 # Module Repository Information #
 #################################
 
-my %module_info = ();
 $module_info{ALIVE}         = {group => "epics-modules",         repo => "alive"};
 $module_info{AREA_DETECTOR} = {group => "areaDetector",          repo => "areaDetector"};
 $module_info{ASYN}          = {group => "epics-modules",         repo => "asyn"};
+$module_info{AUTOPARAM}     = {group => "Cosylab",               repo => "autoparamDriver"};
 $module_info{AUTOSAVE}      = {group => "epics-modules",         repo => "autosave"};
 $module_info{BUSY}          = {group => "epics-modules",         repo => "busy"};
 $module_info{CALC}          = {group => "epics-modules",         repo => "calc"};
@@ -262,12 +470,13 @@ $module_info{DXP}           = {group => "epics-modules",         repo => "dxp"};
 $module_info{DXPSITORO}     = {group => "epics-modules",         repo => "dxpSITORO"};
 $module_info{DEVIOCSTATS}   = {group => "epics-modules",         repo => "iocStats"};
 $module_info{ETHERIP}       = {group => "epics-modules",         repo => "ether_ip"};
-$module_info{GALIL}         = {group => "motorapp",              repo => "Galil-3-0"};
+$module_info{GALIL}         = {group => "motorapp",              repo => "Galil"};
 $module_info{IP}            = {group => "epics-modules",         repo => "ip"};
 $module_info{IPAC}          = {group => "epics-modules",         repo => "ipac"};
 $module_info{IP330}         = {group => "epics-modules",         repo => "ip330"};
 $module_info{IPUNIDIG}      = {group => "epics-modules",         repo => "ipUnidig"};
 $module_info{LABJACK}       = {group => "epics-modules",         repo => "LabJack"};
+$module_info{KETEK}         = {group => "epics-modules",         repo => "ketek"};
 $module_info{LOVE}          = {group => "epics-modules",         repo => "love"};
 $module_info{LUA}           = {group => "epics-modules",         repo => "lua"};
 $module_info{MCA}           = {group => "epics-modules",         repo => "mca"};
@@ -276,14 +485,17 @@ $module_info{MODBUS}        = {group => "epics-modules",         repo => "modbus
 $module_info{MOTOR}         = {group => "epics-modules",         repo => "motor"};
 $module_info{MCOREUTILS}    = {group => "epics-modules",         repo => "MCoreUtils"};
 $module_info{OPTICS}        = {group => "epics-modules",         repo => "optics"};
+$module_info{PYDEVSUP}      = {group => "epics-modules",         repo => "pyDevSup"};
 $module_info{QUADEM}        = {group => "epics-modules",         repo => "quadEM"};
 $module_info{SCALER}        = {group => "epics-modules",         repo => "scaler"};
-$module_info{SNCSEQ}        = {group => "mdavidsaver",           repo => "sequencer-mirror"};
+$module_info{SNCSEQ}        = {group => "epics-modules",         repo => "sequencer"};
 $module_info{SOFTGLUE}      = {group => "epics-modules",         repo => "softGlue"};
 $module_info{SOFTGLUEZYNQ}  = {group => "epics-modules",         repo => "softGlueZynq"};
 $module_info{SSCAN}         = {group => "epics-modules",         repo => "sscan"};
 $module_info{STD}           = {group => "epics-modules",         repo => "std"};
 $module_info{STREAM}        = {group => "paulscherrerinstitute", repo => "StreamDevice"};
+$module_info{TWINCAT}       = {group => "epics-modules",         repo => "twincat-ads"};
+$module_info{URROBOT}       = {group => "epics-modules",         repo => "urRobot"};
 $module_info{VAC}           = {group => "epics-modules",         repo => "vac"};
 $module_info{VME}           = {group => "epics-modules",         repo => "vme"};
 $module_info{XSPRESS3}      = {group => "epics-modules",         repo => "xspress3"};
@@ -291,6 +503,117 @@ $module_info{YOKOGAWA_DAS}  = {group => "epics-modules",         repo => "Yokoga
 $module_info{XXX}           = {group => "epics-modules",         repo => "xxx"};
 
 
+################################
+# Module Patch Definitions     #
+################################
+
+$module_patches{AUTOPARAM} = [
+ 	{op => "substitute", search => "MODULES =", replace => "SUPPORT =", file => "configure/RELEASE"},
+];
+
+$module_patches{CALC} = [
+	{op => "substitute", search => "#SNCSEQ", replace => "SNCSEQ", file => "configure/RELEASE",
+	 cond => sub { exists($modules{SNCSEQ}) }},
+];
+
+$module_patches{DXP} = [
+	{op => "add_line",   line => "EPICS_BASE=", file => "./configure/RELEASE"},
+	{op => "write_file", file => "configure/CONFIG_SITE.linux-x86.linux-arm",
+	                     lines => ["LINUX_USB_INSTALLED = NO"]},
+	{op => "write_file", file => "configure/CONFIG_SITE.linux-x86_64.linux-arm",
+	                     lines => ["LINUX_USB_INSTALLED = NO"]},
+];
+
+$module_patches{DANTE} = [
+	{op => "substitute", search => "linux-x86_64", replace => "x86_64", file => "danteApp/danteSrc/Makefile"},
+];
+
+$module_patches{ETHERIP} = [
+	{op => "add_line",   line => "EPICS_BASE=", file => "./configure/RELEASE"},
+	{op => "substitute", search => '\QDIRS += testether_ipApp\E',           replace => '#DIRS \+= testether_ipApp',           file => "Makefile"},
+	{op => "substitute", search => '\QUSR_CFLAGS += -Wno-unused-value\E',   replace => 'USR_CFLAGS_Darwin \+= -Wno-unused-value', file => "ether_ipApp/src/Makefile"},
+	{op => "substitute", search => "SYS_DLL_LIBS",                          replace => "USR_SYS_LIBS_WIN32",                  file => "ether_ipApp/src/Makefile"},
+	{op => "substitute", search => "EPICS_UPDATE_LEVEL",                     replace => "EPICS_PATCH_LEVEL",                   file => "ether_ipApp/src/ether_ip.rc"},
+];
+
+$module_patches{IPAC} = [
+	{op => "add_line",   line => '-include $(TOP)/../RELEASE.local',                    file => "./configure/RELEASE"},
+	{op => "add_line",   line => '-include $(TOP)/../RELEASE.$(EPICS_HOST_ARCH).local', file => "./configure/RELEASE"},
+	{op => "add_line",   line => '-include $(TOP)/configure/RELEASE.local',             file => "./configure/RELEASE"},
+	{op => "substitute", search => '#registrar\(vipc', replace => "registrar(vipc", file => "drvIpac/drvIpac.dbd"},
+	{op => "substitute", search => '#registrar\(tvme', replace => "registrar(tvme", file => "drvIpac/drvIpac.dbd"},
+	{op => "substitute", search => '#registrar\(xy96', replace => "registrar(xy96", file => "drvIpac/drvIpac.dbd"},
+];
+
+$module_patches{LABJACK} = [
+	{op => "substitute", search => "PROD_IOC_WIN32 = LabJackApp",
+	                     replace => "ifeq (windows-x64, \$(findstring windows-x64, \$(T_A)))\nPROD_IOC_WIN32 = LabJackApp\nendif",
+	                     file => "LabJackApp/src/Makefile"},
+	{op => "substitute", search => '\QLIBRARY_IOC_WIN32 += LabJack\E',
+	                     replace => "ifeq (windows-x64, \$(findstring windows-x64, \$(T_A)))\nLIBRARY_IOC_WIN32 \+= LabJack\nendif",
+	                     file => "LabJackApp/src/Makefile"},
+];
+
+$module_patches{MOTOR} = [
+	{op => "init_submodules"},
+	{op => "substitute", search => "#!LUA=", replace => "LUA=", file => "configure/RELEASE", 
+	 cond => sub { exists($modules{LUA}) }},
+];
+
+$module_patches{MCA} = [
+	{op => "add_line",   line => "SCALER=", file => "./configure/RELEASE"},
+	{op => "write_file", file => "configure/CONFIG_SITE.linux-x86_64.linux-arm",
+	                     lines => ["LINUX_LIBUSB-1.0_INSTALLED = NO"]},
+	{op => "write_file", file => "configure/CONFIG_SITE.linux-x86.linux-arm",
+	                     lines => ["LINUX_LIBUSB-1.0_INSTALLED = NO"]},
+];
+
+$module_patches{MCOREUTILS} = [
+	{op => "add_line", line => 'EPICS_BASE=', file => "./configure/RELEASE.local"},
+	{op => "add_line", line => 'SUPPORT=', file => "./configure/RELEASE.local"},
+	{op => "add_line", line => 'SNCSEQ=', file => "./configure/RELEASE.local",
+	 cond => sub { exists($modules{SNCSEQ}) }},
+];
+
+$module_patches{PYDEVSUP} = [
+	{op => "add_line", line => "EPICS_BASE=", file => "./configure/RELEASE.local"},
+	{op => "add_line", line => "SUPPORT=", file => "./configure/RELEASE.local"},
+	{op => "add_line", line => "DEVIOCSTATS=", file => "./configure/RELEASE.local",
+	 cond => sub { exists($modules{DEVIOCSTATS}) }},
+	{op => "add_line", line => "AUTOSAVE=", file => "./configure/RELEASE.local",
+	 cond => sub { exists($modules{AUTOSAVE}) }},
+	{op => "add_line", line => "CAPUTLOG=", file => "./configure/RELEASE.local",
+	 cond => sub { exists($modules{CAPUTLOG}) }},
+];
+
+$module_patches{QUADEM} = [
+	{op => "unlink_glob", pattern => "quadEMApp/op/ui/*.ui"},
+];
+
+$module_patches{STREAM} = [
+	{op => "unlink",     file => "GNUmakefile"},
+	{op => "substitute", search => "PCRE=", replace => "#PCRE=", file => "configure/RELEASE"},
+	{op => "add_line",   line => "SNCSEQ=", file => "./configure/RELEASE",
+	 cond => sub { exists($modules{SNCSEQ}) }},
+	{op => "add_line",   line => "SSCAN=",  file => "./configure/RELEASE"},
+	{op => "add_line",   line => "STREAM=", file => "./configure/RELEASE"},
+];
+
+$module_patches{TWINCAT} = [
+	{op => "init_submodules"},
+	{op => "add_line", line => "EPICS_BASE=", file => "./configure/RELEASE.local"},
+	{op => "add_line", line => "SUPPORT=", file => "./configure/RELEASE.local"},
+	{op => "add_line", line => "ASYN=", file => "./configure/RELEASE.local"},	
+];
+
+$module_patches{XSPRESS3} = [
+	{op => "substitute", search => "linux-x86_64", replace => "x86_64", file => "xspress3App/src/Makefile"},
+	{op => "substitute", search => "linux-x86_64", replace => "x86_64", file => "iocs/xspress3IOC/xspress3App/src/Makefile"},
+];
+
+$module_patches{YOKOGAWA_DAS} = [
+	{op => "substitute", search => "CROSS_COMPILER_TARGET_ARCHS", replace => "#CROSS_COMPILER_TARGET_ARCHS", file => "configure/CONFIG_SITE"},
+];
 
 
 ####################
@@ -298,17 +621,19 @@ $module_info{XXX}           = {group => "epics-modules",         repo => "xxx"};
 ####################
 
 mkdir "${SYNAPPS_DIR}";
-chdir "${SYNAPPS_DIR}";
+chdir "${SYNAPPS_DIR}" or die "ERROR: Cannot enter directory ${SYNAPPS_DIR}: $!\n";
 
 if (! -d "support")
 {
-	`git clone -q https://github.com/EPICS-synApps/support.git`;
-	chdir "support";
-	`git checkout -q $SUPPORT`;
-	chdir "..";
+	run_cmd("git", "clone", @git_quiet, "https://github.com/EPICS-synApps/support.git");
+	die "ERROR: Failed to clone support repository\n" if $? != 0;
+	chdir "support" or die "ERROR: Cannot enter directory support: $!\n";
+	run_cmd("git", "checkout", @git_quiet, "$SUPPORT");
+	die "ERROR: Failed to checkout support tag $SUPPORT\n" if $? != 0;
+	chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
 }
 
-chdir "support";
+chdir "support" or die "ERROR: Cannot enter directory support: $!\n";
 
 my $SUPPORT_DIR = getcwd();
 
@@ -316,10 +641,15 @@ open(my $RELEASE, '>', "configure/RELEASE") or die("can't open RELEASE");
 
 
 say $RELEASE  "SUPPORT=$SUPPORT_DIR";
-say $RELEASE  '-include $(TOP)/configure/SUPPORT.$(EPICS_HOST_ARCH)';
+say $RELEASE  '-include $(SUPPORT)/configure/SUPPORT';
+say $RELEASE  '-include $(SUPPORT)/configure/SUPPORT.local';
+say $RELEASE  '-include $(SUPPORT)/configure/SUPPORT.$(EPICS_HOST_ARCH)';
+say $RELEASE  '-include $(SUPPORT)/configure/SUPPORT.$(EPICS_HOST_ARCH).local';
 say $RELEASE  "EPICS_BASE=$EPICS_BASE";
-say $RELEASE  '-include $(TOP)/configure/EPICS_BASE';
-say $RELEASE  '-include $(TOP)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)';
+say $RELEASE  '-include $(SUPPORT)/configure/EPICS_BASE';
+say $RELEASE  '-include $(SUPPORT)/configure/EPICS_BASE.local';
+say $RELEASE  '-include $(SUPPORT)/configure/EPICS_BASE.$(EPICS_HOST_ARCH)';
+say $RELEASE  '-include $(SUPPORT)/configure/EPICS_BASE.$(EPICS_HOST_ARCH).local';
 say $RELEASE  "";
 say $RELEASE  "";
 
@@ -344,35 +674,53 @@ if (exists($modules{ALLENBRADLEY}))
 	
 	$FILTER_TAG =~ s/\./-/g;
 	
-	rmtree("allenBradley-${FILTER_TAG}");
-	say $RELEASE "ALLENBRADLEY=\$(SUPPORT)/allenBradley-${FILTER_TAG}";
-	
-	`curl -LO https://epics.anl.gov/download/modules/allenBradley-${TAG}.tar.gz`;
-	
-	`tar zxf allenBradley-${TAG}.tar.gz`;
-	move("allenBradley-${TAG}", "allenBradley-${FILTER_TAG}");
-	unlink "allenBradley-${TAG}.tar.gz";
-	
-	chdir "allenBradley-$FILTER_TAG";
-	add_line("-include \$(TOP)/../RELEASE.local", "./configure/RELEASE");
-	add_line("-include \$(TOP)/../RELEASE.\$(EPICS_HOST_ARCH).local", "./configure/RELEASE");
-	add_line("-include \$(TOP)/configure/RELEASE.local", "./configure/RELEASE");
-	chdir "..";
+	if ($UPDATE && -d "allenBradley-${FILTER_TAG}")
+	{
+		info "Skipping allenBradley (already present)\n";
+		say $RELEASE "ALLEN_BRADLEY=\$(SUPPORT)/allenBradley-${FILTER_TAG}";
+	}
+	else
+	{
+		rmtree("allenBradley-${FILTER_TAG}");
+		say $RELEASE "ALLEN_BRADLEY=\$(SUPPORT)/allenBradley-${FILTER_TAG}";
+		
+		run_cmd("curl", "-LO", "https://epics.anl.gov/download/modules/allenBradley-${TAG}.tar.gz");
+		die "ERROR: Failed to download allenBradley-${TAG}.tar.gz\n" if $? != 0;
+		
+		run_cmd("tar", "zxf", "allenBradley-${TAG}.tar.gz");
+		die "ERROR: Failed to extract allenBradley-${TAG}.tar.gz\n" if $? != 0;
+		move("allenBradley-${TAG}", "allenBradley-${FILTER_TAG}");
+		unlink "allenBradley-${TAG}.tar.gz";
+		
+		chdir "allenBradley-$FILTER_TAG" or die "ERROR: Cannot enter directory allenBradley-$FILTER_TAG: $!\n";
+		add_line("-include \$(TOP)/../RELEASE.local", "./configure/RELEASE");
+		add_line("-include \$(TOP)/../RELEASE.\$(EPICS_HOST_ARCH).local", "./configure/RELEASE");
+		add_line("-include \$(TOP)/configure/RELEASE.local", "./configure/RELEASE");
+		chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
+		
+		$updated{ALLENBRADLEY} = 1;
+	}
 }
 
 
-if (exists($modules{AREA_DETECTOR}))
+if (exists($modules{AREA_DETECTOR}) && (!$UPDATE || $updated{AREA_DETECTOR}))
 {
 	#get_repo("areaDetector", "areaDetector", "AREA_DETECTOR", "$modules{AREA_DETECTOR}", $RELEASE);
 
-	chdir "areaDetector-$modules{AREA_DETECTOR}/configure";
+	chdir "areaDetector-$modules{AREA_DETECTOR}/configure" or die "ERROR: Cannot enter areaDetector configure directory: $!\n";
 	
 	copy("EXAMPLE_CONFIG_SITE.local", "CONFIG_SITE.local");
 	
-	if ($WITH_PVA eq "NO")
+	if ($WITH_PVA eq "YES")
 	{
-		do_substitution("WITH_PVA = YES", "WITH_PVA = NO", "CONFIG_SITE.local");
-		do_substitution("WITH_QSRV = YES", "WITH_QSRV = NO", "CONFIG_SITE.local");
+		do_substitution("WITH_PVXS\\s*=\\s*YES", "#WITH_PVXS = YES", "CONFIG_SITE.local");
+		do_substitution("#WITH_QSRV\\s*=\\s*YES", "WITH_QSRV = YES", "CONFIG_SITE.local");
+	}
+	else
+	{
+		do_substitution("WITH_PVA\\s*=\\s*YES", "WITH_PVA = NO", "CONFIG_SITE.local");
+		do_substitution("WITH_PVXS\\s*=\\s*YES", "WITH_PVXS = NO", "CONFIG_SITE.local");
+		do_substitution("WITH_QSRV\\s*=\\s*YES", "WITH_QSRV = NO", "CONFIG_SITE.local");
 	}
 	
 	copy("EXAMPLE_CONFIG_SITE.local.WIN32", "CONFIG_SITE.local.WIN32");
@@ -391,25 +739,27 @@ if (exists($modules{AREA_DETECTOR}))
 	add_line("WITH_BITSHUFFLE = NO", "CONFIG_SITE.local.linux-x86_64.linux-arm");
 	copy("CONFIG_SITE.local.linux-x86_64.linux-arm", "CONFIG_SITE.local.linux-x86.linux-arm");
 	
-	chdir "..";
+	chdir ".." or die "ERROR: Cannot return to areaDetector root: $!\n";
 
 	say $RELEASE "ADCORE=\$(AREA_DETECTOR)/ADCore";
 	say $RELEASE "ADSUPPORT=\$(AREA_DETECTOR)/ADSupport";
 	
-	`git submodule init`;
+	run_cmd("git", "submodule", "init");
+	warn "WARNING: git submodule init failed for areaDetector\n" if $? != 0;
 	
 	my @submods = ("ADCore", "ADSupport", "ADSimDetector");
-	push @submods, split(/ /, $modules{AREA_DETECTOR_SUBMODULES});
+	push @submods, grep { $_ ne '' } split(/\s+/, $modules{AREA_DETECTOR_SUBMODULES});
 	
 	foreach my $modname (@submods)
 	{
 		my $uppername = uc $modname;
 		
-		`git submodule update ${modname}`;
+		run_cmd("git", "submodule", "update", "${modname}");
+		warn "WARNING: git submodule update failed for $modname\n" if $? != 0;
 		do_substitution("#${uppername}=", "${uppername}=", "configure/RELEASE.local");
 	}
 	
-	chdir "ADCore/iocBoot";
+	chdir "ADCore/iocBoot" or die "ERROR: Cannot enter ADCore/iocBoot: $!\n";
 	
 	copy("EXAMPLE_commonPlugins.cmd", "commonPlugins.cmd");
 	copy("EXAMPLE_commonPlugin_settings.req", "commonPlugin_settings.req");
@@ -421,12 +771,12 @@ if (exists($modules{AREA_DETECTOR}))
 		do_substitution("#startPVAServer", "startPVAServer", "commonPlugins.cmd");
 	}
 	
-	chdir "../../..";
+	chdir "../../.." or die "ERROR: Cannot return to support directory from ADCore/iocBoot: $!\n";
 }
 
-if (exists($modules{ASYN}))
+if (exists($modules{ASYN}) && (!$UPDATE || $updated{ASYN}))
 {
-	chdir "asyn-$modules{ASYN}";
+	chdir "asyn-$modules{ASYN}" or die "ERROR: Cannot enter directory asyn-$modules{ASYN}: $!\n";
 	
 	unlink("configure/RELEASE.local");
 	add_line("EPICS_BASE=", "./configure/RELEASE.local");
@@ -435,23 +785,13 @@ if (exists($modules{ASYN}))
 	
 	my $tirpc = "NO";
 	
-	if (-e "/etc/redhat-release")
-	{
-		my $version = `cat /etc/redhat-release`;
-		
-		if (grep(/release 8/, $version))
-		{
-			$tirpc = "YES";
-		}
-	}
-	
 	if (-e "/usr/include/tirpc/rpc/rpc.h")
 	{
 		$tirpc = "YES";
 	}
 	
 	
-	if ($tirpc == "YES")
+	if ($tirpc eq "YES")
 	{
 		unlink("./configure/CONFIG_SITE.Common.linux-x86_64");
 		add_line("TIRPC = YES", "./configure/CONFIG_SITE.Common.linux-x86_64");
@@ -461,145 +801,102 @@ if (exists($modules{ASYN}))
 		copy("./configure/CONFIG_SITE.Common.linux-x86_64", "./configure/CONFIG_SITE.Common.rhel9-x86_64-debug");
 	}
 	
-	chdir "..";
+	do_substitution("#DRV_VXI11", "DRV_VXI11", "./configure/CONFIG_SITE");
+	
+	chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
 }
 
-if (exists($modules{CALC}))
+if (exists($modules{MEASCOMP}) && (!$UPDATE || $updated{MEASCOMP}))
 {
-	if (exists($modules{SNCSEQ}))
-	{
-		chdir "calc-$modules{CALC}";
-		
-		do_substitution("#SNCSEQ", "SNCSEQ", "configure/RELEASE");
-
-		chdir "..";
-	}
-}
-
-if (exists($modules{DXP}))
-{
-	chdir "dxp-$modules{DXP}";
-	add_line("EPICS_BASE=", "./configure/RELEASE");
-	
-	unlink("configure/CONFIG_SITE.linux-x86.linux-arm");
-	add_line("LINUX_USB_INSTALLED = NO", "./configure/CONFIG_SITE.linux-x86.linux-arm");
-	
-	unlink("configure/CONFIG_SITE.linux-86_64.linux-arm");
-	add_line("LINUX_USB_INSTALLED = NO", "./configure/CONFIG_SITE.linux-x86_64.linux-arm");
-	
-	chdir "..";
-}
-
-if (exists($modules{DANTE}))
-{
-	chdir "Dante-$modules{DANTE}";
-	
-	do_substitution("linux-x86_64", "x86_64", "danteApp/danteSrc/Makefile");
-	
-	chdir "..";
-}
-
-if (exists($modules{ETHERIP}))
-{
-	chdir "ether_ip-$modules{ETHERIP}";	
-	add_line("EPICS_BASE=", "./configure/RELEASE");
-
-	do_substitution("\QDIRS += testether_ipApp\E", "#DIRS \+= testether_ipApp", "Makefile");
-	
-	do_substitution("\QUSR_CFLAGS += -Wno-unused-value\E", "USR_CFLAGS_Darwin \+= -Wno-unused-value", "ether_ipApp/src/Makefile");
-	do_substitution("SYS_DLL_LIBS", "USR_SYS_LIBS_WIN32", "ether_ipApp/src/Makefile");
-
-	do_substitution("EPICS_UPDATE_LEVEL", "EPICS_PATCH_LEVEL", "ether_ipApp/src/ether_ip.rc");
-
-	chdir "..";
-}
-
-if (exists($modules{GALIL}))
-{
-	my $FILTER_TAG=$modules{GALIL};
-	
-	$FILTER_TAG =~ s/V//g;
-	
-	chdir "Galil-3-0-$modules{GALIL}";
-	
-	copy_recur("${FILTER_TAG}/.", "./");
-	rmtree("${FILTER_TAG}");
-	
-	copy("./config/GALILRELEASE", "./configure/RELEASE.local");
-
-	add_line('-include $(TOP)/../RELEASE.local', "./configure/RELEASE");
-	add_line('-include $(TOP)/../RELEASE.$(EPICS_HOST_ARCH).local', "./configure/RELEASE");
-	add_line('-include $(TOP)/configure/RELEASE.local', "./configure/RELEASE");
-	
-	do_substitution("\QLIBRARY_IOC += GalilSupport\E", "LIBRARY_IOC_Linux \+= GalilSupport\nLIBRARY_IOC_WIN32 += GalilSupport", "GalilSup/src/Makefile");
-	do_substitution("PROD_IOC = GalilTest", "PROD_IOC_Linux = GalilTest\nPROD_IOC_WIN32 = GalilTest", "GalilTestApp/src/Makefile");
-	
-	if (exists($modules{SNCSEQ}))
-	{
-		do_substitution("asyn motor calc sscan autosave busy", "asyn motor calc sscan autosave busy seq pv", "GalilTestApp/src/Makefile");
-	}
-	
-	chdir "..";
-}
-
-if (exists($modules{IPAC}))
-{
-	my $FILTER_TAG=$modules{IPAC};
-	
-	$FILTER_TAG =~ s/\./-/g;
-	
-	chdir "ipac-${FILTER_TAG}";
-	
-	add_line('-include $(TOP)/../RELEASE.local', "./configure/RELEASE");
-	add_line('-include $(TOP)/../RELEASE.$(EPICS_HOST_ARCH).local', "./configure/RELEASE");
-	add_line('-include $(TOP)/configure/RELEASE.local', "./configure/RELEASE");
-	
-	do_substitution('#registrar\(vipc', "registrar(vipc", "drvIpac/drvIpac.dbd");
-	do_substitution('#registrar\(tvme', "registrar(tvme", "drvIpac/drvIpac.dbd");
-	do_substitution('#registrar\(xy96', "registrar(xy96", "drvIpac/drvIpac.dbd");
-	
-	chdir "..";
-}
-
-if (exists($modules{LABJACK}))
-{
-	chdir "LabJack-$modules{LABJACK}";
-
-	do_substitution ( "PROD_IOC_WIN32 = LabJackApp", "ifeq (windows-x64, \$(findstring windows-x64, \$(T_A)))\nPROD_IOC_WIN32 = LabJackApp\nendif", "LabJackApp/src/Makefile");
-	do_substitution ( "\QLIBRARY_IOC_WIN32 += LabJack\E", "ifeq (windows-x64, \$(findstring windows-x64, \$(T_A)))\nLIBRARY_IOC_WIN32 \+= LabJack\nendif", "LabJackApp/src/Makefile");
-
-	chdir "..";
-}
-
-if (exists($modules{MEASCOMP}))
-{
-	chdir "measComp-$modules{MEASCOMP}";
+	my $MEASCOMP_DIR = module_dir("MEASCOMP");
+	chdir $MEASCOMP_DIR or die "ERROR: Cannot enter directory $MEASCOMP_DIR: $!\n";
 	
 	
-	if ($^O eq "linux")
+	if ($^O eq "linux" && exists($modules{ULDAQ}))
 	{
 		my $ULDAQ = $modules{ULDAQ};
 		
-		rmtree("libuldaq-${ULDAQ}");
-		`curl -LO https://github.com/mccdaq/uldaq/releases/download/v${ULDAQ}/libuldaq-${ULDAQ}.tar.bz2`;
-		`tar -xvjf libuldaq-${ULDAQ}.tar.bz2`;
-		unlink("libuldaq-${ULDAQ}.tar.bz2");
-	
-		chdir "libuldaq-${ULDAQ}";
+		# Write ULDAQ path to support RELEASE
+		say $RELEASE "ULDAQ=\$(SUPPORT)/$MEASCOMP_DIR/libuldaq";
 		
-		my $PWD = getcwd();
+		if ($UPDATE && -d "libuldaq")
+		{
+			info "Skipping uldaq download (already present)\n";
+		}
+		else
+		{
+			rmtree("libuldaq");
+			run_cmd("curl", "-LO", "https://github.com/mccdaq/uldaq/releases/download/v${ULDAQ}/libuldaq-${ULDAQ}.tar.bz2");
+			die "ERROR: Failed to download libuldaq-${ULDAQ}.tar.bz2\n" if $? != 0;
+			run_cmd("tar", "-xvjf", "libuldaq-${ULDAQ}.tar.bz2");
+			die "ERROR: Failed to extract libuldaq-${ULDAQ}.tar.bz2\n" if $? != 0;
+			unlink("libuldaq-${ULDAQ}.tar.bz2");
+			move("libuldaq-${ULDAQ}", "libuldaq");
+		}
 		
-		system("./configure --prefix=${PWD}");
-		system("make");
-		`make install || true`;
-		
-		unlink("../configure/CONFIG_SITE.local");
-		add_line("USR_LDFLAGS+=-L${PWD}/lib", "../configure/CONFIG_SITE.local");
-		add_line("USR_CPPFLAGS+=-I${PWD}/include", "../configure/CONFIG_SITE.local");
+		# Write out-of-tree autotools wrapper Makefile
+		# Installs library and header into measComp's lib/<arch>/ and include/ directories
+		open(my $mf, ">", "libuldaq/Makefile") or die "ERROR: Cannot write libuldaq/Makefile: $!\n";
+		print $mf <<'ULDAQ_MAKEFILE';
+# Makefile for building libuldaq per EPICS_HOST_ARCH
+# Installs into measComp's lib and include directories so downstream
+# consumers find libuldaq automatically via the MEASCOMP path.
 
-		say $RELEASE  "ULDAQ=${PWD}";
+TOP_DIR      := $(abspath .)
+MEASCOMP_TOP := $(abspath $(TOP_DIR)/..)
+BUILD_DIR    := $(TOP_DIR)/build-$(EPICS_HOST_ARCH)
+INSTALL_LIB  := $(MEASCOMP_TOP)/lib/$(EPICS_HOST_ARCH)
+INSTALL_INC  := $(MEASCOMP_TOP)/include
 
-		chdir "..";
+all install: $(INSTALL_LIB)/libuldaq.a
+
+$(INSTALL_LIB)/libuldaq.a:
+	@echo "Building libuldaq for $(EPICS_HOST_ARCH)..."
+	mkdir -p $(BUILD_DIR) $(INSTALL_LIB) $(INSTALL_INC)
+	cd $(BUILD_DIR) && $(TOP_DIR)/configure \
+		--prefix=$(MEASCOMP_TOP) \
+		--libdir=$(INSTALL_LIB) \
+		--includedir=$(INSTALL_INC)
+	$(MAKE) -C $(BUILD_DIR)
+	-$(MAKE) -C $(BUILD_DIR) install
+	@echo "libuldaq installed to $(INSTALL_LIB)"
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+distclean realclean: clean
+	rm -f $(INSTALL_LIB)/libuldaq.a $(INSTALL_LIB)/libuldaq.la
+	rm -f $(INSTALL_LIB)/libuldaq.so*
+	rm -f $(INSTALL_INC)/uldaq.h
+	rm -rf build-*
+
+rebuild: distclean all
+
+uninstall:
+	rm -f $(INSTALL_LIB)/libuldaq.a $(INSTALL_LIB)/libuldaq.la
+	rm -f $(INSTALL_LIB)/libuldaq.so*
+	rm -f $(INSTALL_INC)/uldaq.h
+
+.PHONY: all install clean distclean realclean rebuild uninstall
+ULDAQ_MAKEFILE
+		close($mf);
+		
+		# Write CONFIG_SITE.local pointing at measComp's own lib/include directories
+		unlink("configure/CONFIG_SITE.local");
+		add_line('ULDAQ_DIR=$(TOP)/lib/$(EPICS_HOST_ARCH)', "./configure/CONFIG_SITE.local");
+		add_line('ULDAQ_INCLUDE=$(TOP)/include', "./configure/CONFIG_SITE.local");
+		
+		# Add libuldaq to DIRS in measComp's top-level Makefile
+		do_substitution(
+			'DIRS := \$\(DIRS\) measCompSupport',
+			'DIRS := $(DIRS) $(filter-out $(DIRS), $(wildcard libuldaq))' . "\n" . 'DIRS := $(DIRS) measCompSupport',
+			"Makefile"
+		);
+		do_substitution(
+			'measCompApp_DEPEND_DIRS \+= measCompSupport',
+			"measCompSupport_DEPEND_DIRS += libuldaq\nmeasCompApp_DEPEND_DIRS += measCompSupport",
+			"Makefile"
+		);
 	}
 	
 	if ($HAVE_HIDAPI eq "NO")
@@ -610,121 +907,18 @@ if (exists($modules{MEASCOMP}))
 		}
 	}
 	
-	chdir "..";
+	chdir ".." or die "ERROR: Cannot return to parent directory: $!\n";
 }
 
-if (exists($modules{MCA}))
+
+##############################
+# Data-Driven Module Patches #
+##############################
+
+foreach my $key (sort keys %module_patches)
 {
-	chdir "mca-$modules{MCA}";
-	add_line("SCALER=", "./configure/RELEASE");
-	
-	unlink("configure/CONFIG_SITE.linux-x86.linux-arm");
-	unlink("configure/CONFIG_SITE.linux-x86_64.linux-arm");
-	add_line("LINUX_LIBUSB-1.0_INSTALLED = NO", "./configure/CONFIG_SITE.linux-x86_64.linux-arm");
-	add_line("LINUX_LIBUSB-1.0_INSTALLED = NO", "./configure/CONFIG_SITE.linux-x86.linux-arm");
-	chdir "..";
+	apply_patches($key, $module_patches{$key});
 }
-
-if (exists($modules{MOTOR}))
-{
-	chdir "motor-$modules{MOTOR}";
-	`git submodule init`;
-	`git submodule update`;
-	
-	if (exists($modules{LUA}))
-	{
-		do_substitution("#!LUA=", "LUA=", "configure/RELEASE");
-	}
-	
-	chdir "..";
-}
-
-if (exists($modules{MCOREUTILS}))
-{
-	my $FILTER_TAG=$modules{MCOREUTILS};
-	$FILTER_TAG =~ s/\./-/g;
-	chdir "MCoreUtils-$FILTER_TAG";
-	add_line("-include \$(MCOREUTILS)/configure/RELEASE", "./exampleTop/configure/RELEASE");
-	chdir "..";
-}
-
-
-if (exists($modules{QUADEM}))
-{
-	chdir "quadEM-$modules{QUADEM}";
-
-	foreach my $file (glob("quadEMApp/op/ui/*.ui"))
-	{
-		unlink("$file");
-	}
-
-	chdir "..";
-}
-
-if (exists($modules{STREAM}))
-{
-	my $FILTER_TAG=$modules{STREAM};
-	
-	$FILTER_TAG =~ s/\./-/g;
-	
-	chdir "StreamDevice-${FILTER_TAG}";
-	
-	unlink("GNUmakefile");
-	
-	do_substitution( "PCRE=", "#PCRE=", "configure/RELEASE");
-	
-	if (exists($modules{SNCSEQ}))
-	{
-		add_line("SNCSEQ=", "./configure/RELEASE");
-	}
-	
-	add_line("SSCAN=", "./configure/RELEASE");
-	add_line("STREAM=", "./configure/RELEASE");
-	
-	chdir "..";
-}
-
-if (exists($modules{XSPRESS3}))
-{
-	my $FILTER_TAG=$modules{XSPRESS3};
-	
-	$FILTER_TAG =~ s/\./-/g;
-	
-	chdir "xspress3-${FILTER_TAG}";
-	
-	do_substitution("linux-x86_64", "x86_64", "xspress3App/src/Makefile");
-	do_substitution("linux-x86_64", "x86_64", "iocs/xspress3IOC/xspress3App/src/Makefile");
-	
-	chdir "..";
-}
-
-if (exists($modules{YOKOGAWA_DAS}))
-{
-	chdir "Yokogawa_DAS-$modules{YOKOGAWA_DAS}";
-
-	do_substitution("CROSS_COMPILER_TARGET_ARCHS", "#CROSS_COMPILER_TARGET_ARCHS", "configure/CONFIG_SITE");
-
-	chdir "..";
-}
-
-
-# Temporarily use mdavidsaver's mirror repo
-#if (exists($modules{SNCSEQ}))
-#{
-#	my $TAG=$modules{SNCSEQ};
-#	my $FILTER_TAG=$modules{SNCSEQ};
-#	
-#	$FILTER_TAG =~ s/\./-/g;
-#	
-#	rmtree("seq-${FILTER_TAG}");
-#	say $RELEASE "SNCSEQ=\$(SUPPORT)/seq-${FILTER_TAG}";
-#	
-#	`curl -LO https://www-csr.bessy.de/control/SoftDist/sequencer/releases/seq-${TAG}.tar.gz`;
-#	
-#	`tar zxf seq-${TAG}.tar.gz`;
-#	move("seq-${TAG}", "seq-${FILTER_TAG}");
-#	unlink "seq-${TAG}.tar.gz";
-#}
 
 
 say $RELEASE  "";
@@ -737,4 +931,5 @@ say $RELEASE "-include \$(SUPPORT)/configure/RELEASE.\$(EPICS_HOST_ARCH).local";
 
 close($RELEASE);
 
-`make release`;
+run_cmd("make", "release");
+warn "WARNING: 'make release' failed -- module RELEASE files may be inconsistent\n" if $? != 0;
