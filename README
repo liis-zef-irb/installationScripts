@@ -37,13 +37,13 @@ check file synApps_libi.txt if everything you need is included. If you include s
 
 source ~/.bashrc
 chmod +x install_synApps.sh
-./install_synApps.sh
+./install_synApps.sh --config=synApps_libi.txt
 
 Adding modules and updating synApps:
 
 - Edit synApps_libi.txt to add what you need
 - chmod +x update_synApps.sh
-- ./update_synApps.sh
+- ./update_synApps.sh --config=synApps_libi.txt
 
 Optional:
 
